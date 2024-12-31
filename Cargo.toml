@@ -4,9 +4,11 @@ version = "0.0.1"
 edition = "2021"
 
 [dependencies]
+openmp-sys = {version = "1.2.3", optional = true}
 rand = "0.8.5"
 
 [features]
 default = ["llama3"]
 llama2 = []
 llama3 = []
+openmp = ["openmp-sys"]

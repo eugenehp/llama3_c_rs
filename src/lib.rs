@@ -1,19 +1,6 @@
 use rand::Rng;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
-use std::mem;
-use std::os::unix::io::AsRawFd;
-use std::slice; // For generating random values
-
-const BUFFER_TOKENS: usize = 1;
-const STATS: usize = 1;
-const LLAMA_VER: usize = 2;
-#[cfg(feature = "llama2")]
-const ROPE_TF: f32 = 10_000.0;
-#[cfg(feature = "llama3")]
-const ROPE_TF: f32 = 50_0000.0;
-const BOS: usize = 1;
-const EOS: usize = 2;
+use std::io::{BufRead, BufReader};
 const GS: usize = 64; // Group size for quantization
 
 static mut SYSTEM_TEMPLATE: [u8; 1024] = [0; 1024];
@@ -79,6 +66,7 @@ pub struct Transformer {
     pub fd: i32,
     pub data: Vec<f32>,
     pub file_size: usize,
+    pub rope_tf: f32,
 }
 
 impl TransformerWeights {
@@ -89,9 +77,9 @@ impl TransformerWeights {
         let dim = config.dim;
         let hidden_dim = config.hidden_dim;
         let n_layers = config.n_layers;
-        let n_heads = config.n_heads;
+        // let n_heads = config.n_heads;
         let n_kv_heads = config.n_kv_heads;
-        let seq_len = config.seq_len;
+        // let seq_len = config.seq_len;
         let vocab_size = config.vocab_size;
 
         // Initialize token embedding table with random values
@@ -882,7 +870,7 @@ impl Transformer {
         }
     }
 
-    pub fn forward(mut self, token: usize, pos: usize) -> Vec<f32> {
+    pub fn forward(&mut self, token: usize, pos: usize) -> &Vec<f32> {
         // Convenience variables
         let p = &self.config;
         let w = &self.weights;
@@ -915,7 +903,7 @@ impl Transformer {
             // RoPE relative positional encoding: complex-valued rotate q and k in each head
             for i in (0..dim).step_by(2) {
                 let head_dim = i % head_size;
-                let freq = 1.0 / (ROPE_TF.powf(head_dim as f32 / head_size as f32));
+                let freq = 1.0 / (self.rope_tf.powf(head_dim as f32 / head_size as f32));
                 let val = pos as f32 * freq;
                 let fcr = val.cos();
                 let fci = val.sin();
@@ -1055,6 +1043,96 @@ impl Transformer {
             p.vocab_size,
         );
 
-        self.state.logits
+        self.state.logits.as_ref()
+    }
+
+    /// Generates text based on the input prompt.
+    pub fn generate(
+        &mut self,
+        tokenizer: &Tokenizer,
+        sampler: &mut Sampler,
+        prompt: &str,
+        steps: usize,
+    ) {
+        // Encode the prompt into tokens
+        let mut tokens = encode(tokenizer, prompt, true, false);
+
+        // Iterate for the specified number of steps
+        for step in 0..steps {
+            let pos = tokens.len() - 1;
+            let logits = self.forward(tokens[pos], pos);
+            let next_token = sampler.sample(&logits);
+            tokens.push(next_token);
+
+            // Stop if we reach EOS token
+            if next_token == 2 {
+                break;
+            }
+        }
+
+        // Decode the tokens back into text
+        let mut decoded_text = String::new();
+        let mut prev_token = 1; // Start with BOS token
+        for &token in &tokens {
+            decoded_text.push_str(&decode(tokenizer, prev_token, token));
+            prev_token = token;
+        }
+
+        println!("Generated text: {}", decoded_text);
+    }
+
+    /// Handles interactive chat sessions.
+    pub fn chat(
+        &mut self,
+        tokenizer: &Tokenizer,
+        sampler: &mut Sampler,
+        cli_user_prompt: &mut str,
+        cli_system_prompt: &str,
+        steps: usize,
+    ) {
+        let mut conversation = String::new();
+
+        loop {
+            println!("User: {}", cli_user_prompt);
+            conversation.push_str(cli_user_prompt);
+            conversation.push_str(" ");
+
+            // Encode the conversation into tokens
+            let mut tokens = encode(tokenizer, &conversation, true, false);
+
+            // Iterate for the specified number of steps
+            for step in 0..steps {
+                let pos = tokens.len() - 1;
+                let logits = self.forward(tokens[pos], pos);
+                let next_token = sampler.sample(&logits);
+                tokens.push(next_token);
+
+                // Stop if we reach EOS token
+                if next_token == 2 {
+                    break;
+                }
+            }
+
+            // Decode the tokens back into text
+            let mut decoded_text = String::new();
+            let mut prev_token = 1; // Start with BOS token
+            for &token in &tokens {
+                decoded_text.push_str(&decode(tokenizer, prev_token, token));
+                prev_token = token;
+            }
+
+            println!("System: {}", decoded_text);
+            conversation.push_str(&decoded_text);
+            conversation.push_str(" ");
+
+            // Read new user input
+            let mut user_input = String::new();
+            std::io::stdin().read_line(&mut user_input).unwrap();
+            let user_input = user_input.trim();
+            if user_input == "exit" {
+                break;
+            }
+            // cli_user_prompt = user_input;
+        }
     }
 }
