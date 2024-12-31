@@ -1,3 +1,10 @@
+use rand::Rng;
+use std::fs::File;
+use std::io::Read;
+use std::mem;
+use std::os::unix::io::AsRawFd;
+use std::slice; // For generating random values
+
 const BUFFER_TOKENS: usize = 1;
 const STATS: usize = 1;
 const LLAMA_VER: usize = 2;
@@ -12,72 +19,180 @@ const GS: usize = 64; // Group size for quantization
 static mut SYSTEM_TEMPLATE: [u8; 1024] = [0; 1024];
 static mut USER_TEMPLATE: [u8; 1024] = [0; 1024];
 
-#[derive(Debug)]
-struct Config {
-    dim: usize,
-    hidden_dim: usize,
-    n_layers: usize,
-    n_heads: usize,
-    n_kv_heads: usize,
-    vocab_size: usize,
-    seq_len: usize,
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub dim: usize,
+    pub hidden_dim: usize,
+    pub n_layers: usize,
+    pub n_heads: usize,
+    pub n_kv_heads: usize,
+    pub vocab_size: usize,
+    pub seq_len: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct QuantizedTensor {
+    pub q: Vec<i8>,
+    pub s: Vec<f32>,
 }
 
 #[derive(Debug)]
-struct QuantizedTensor {
-    q: Vec<i8>,
-    s: Vec<f32>,
+pub struct TransformerWeights {
+    pub q_tokens: QuantizedTensor,
+    pub token_embedding_table: Vec<f32>,
+    pub rms_att_weight: Vec<f32>,
+    pub rms_ffn_weight: Vec<f32>,
+    pub wq: Vec<QuantizedTensor>,
+    pub wk: Vec<QuantizedTensor>,
+    pub wv: Vec<QuantizedTensor>,
+    pub wo: Vec<QuantizedTensor>,
+    pub w1: Vec<QuantizedTensor>,
+    pub w2: Vec<QuantizedTensor>,
+    pub w3: Vec<QuantizedTensor>,
+    pub rms_final_weight: Vec<f32>,
+    pub wcls: QuantizedTensor,
+}
+
+impl TransformerWeights {
+    // Function to initialize weights based on the config
+    pub fn from_config(config: &Config) -> Self {
+        let mut rng = rand::thread_rng();
+
+        let dim = config.dim;
+        let hidden_dim = config.hidden_dim;
+        let n_layers = config.n_layers;
+        let n_heads = config.n_heads;
+        let n_kv_heads = config.n_kv_heads;
+        let seq_len = config.seq_len;
+        let vocab_size = config.vocab_size;
+
+        // Initialize token embedding table with random values
+        let token_embedding_table: Vec<f32> = (0..vocab_size * dim)
+            .map(|_| rng.gen_range(-0.1..0.1))
+            .collect();
+
+        // Initialize RMS weights with random values (small values)
+        let rms_att_weight: Vec<f32> = (0..n_layers * dim)
+            .map(|_| rng.gen_range(0.0..0.1))
+            .collect();
+        let rms_ffn_weight: Vec<f32> = (0..n_layers * dim)
+            .map(|_| rng.gen_range(0.0..0.1))
+            .collect();
+        let rms_final_weight: Vec<f32> = (0..dim).map(|_| rng.gen_range(0.0..0.1)).collect();
+
+        // Initialize q_tokens as QuantizedTensor (using random values for q and s)
+        let q_tokens = QuantizedTensor {
+            q: vec![0; vocab_size * dim], // Initialize quantized values to 0
+            s: vec![1.0; vocab_size],     // Initialize scale factors to 1
+        };
+
+        // Initialize the weight matrices (wq, wk, wv, etc.) as QuantizedTensors
+        let wq = (0..n_layers)
+            .map(|_| QuantizedTensor {
+                q: vec![0; dim * dim],
+                s: vec![1.0; dim],
+            })
+            .collect();
+
+        let wk = (0..n_layers)
+            .map(|_| QuantizedTensor {
+                q: vec![0; dim * (dim / n_kv_heads)], // Key size depends on kv_heads
+                s: vec![1.0; dim],
+            })
+            .collect();
+
+        let wv = (0..n_layers)
+            .map(|_| QuantizedTensor {
+                q: vec![0; dim * (dim / n_kv_heads)], // Value size depends on kv_heads
+                s: vec![1.0; dim],
+            })
+            .collect();
+
+        let wo = (0..n_layers)
+            .map(|_| QuantizedTensor {
+                q: vec![0; dim * dim],
+                s: vec![1.0; dim],
+            })
+            .collect();
+
+        let w1 = (0..n_layers)
+            .map(|_| QuantizedTensor {
+                q: vec![0; dim * hidden_dim],
+                s: vec![1.0; dim],
+            })
+            .collect();
+
+        let w2 = (0..n_layers)
+            .map(|_| QuantizedTensor {
+                q: vec![0; hidden_dim * dim],
+                s: vec![1.0; hidden_dim],
+            })
+            .collect();
+
+        let w3 = (0..n_layers)
+            .map(|_| QuantizedTensor {
+                q: vec![0; dim * hidden_dim],
+                s: vec![1.0; dim],
+            })
+            .collect();
+
+        // Initialize wcls as a QuantizedTensor (classifier weights)
+        let wcls = QuantizedTensor {
+            q: vec![0; dim * vocab_size],
+            s: vec![1.0; dim],
+        };
+
+        // Return the initialized TransformerWeights
+        TransformerWeights {
+            q_tokens,
+            token_embedding_table,
+            rms_att_weight,
+            rms_ffn_weight,
+            wq,
+            wk,
+            wv,
+            wo,
+            w1,
+            w2,
+            w3,
+            rms_final_weight,
+            wcls,
+        }
+    }
 }
 
 #[derive(Debug)]
-struct TransformerWeights {
-    q_tokens: QuantizedTensor,
-    token_embedding_table: Vec<f32>,
-    rms_att_weight: Vec<f32>,
-    rms_ffn_weight: Vec<f32>,
-    wq: Vec<QuantizedTensor>,
-    wk: Vec<QuantizedTensor>,
-    wv: Vec<QuantizedTensor>,
-    wo: Vec<QuantizedTensor>,
-    w1: Vec<QuantizedTensor>,
-    w2: Vec<QuantizedTensor>,
-    w3: Vec<QuantizedTensor>,
-    rms_final_weight: Vec<f32>,
-    wcls: QuantizedTensor,
+pub struct RunState {
+    pub x: Vec<f32>,
+    pub xb: Vec<f32>,
+    pub xb2: Vec<f32>,
+    pub hb: Vec<f32>,
+    pub hb2: Vec<f32>,
+    pub xq: QuantizedTensor,
+    pub hq: QuantizedTensor,
+    pub q: Vec<f32>,
+    pub k: Vec<f32>,
+    pub v: Vec<f32>,
+    pub att: Vec<f32>,
+    pub logits: Vec<f32>,
+    pub key_cache: Vec<f32>,
+    pub value_cache: Vec<f32>,
 }
 
 #[derive(Debug)]
-struct RunState {
-    x: Vec<f32>,
-    xb: Vec<f32>,
-    xb2: Vec<f32>,
-    hb: Vec<f32>,
-    hb2: Vec<f32>,
-    xq: QuantizedTensor,
-    hq: QuantizedTensor,
-    q: Vec<f32>,
-    k: Vec<f32>,
-    v: Vec<f32>,
-    att: Vec<f32>,
-    logits: Vec<f32>,
-    key_cache: Vec<f32>,
-    value_cache: Vec<f32>,
+pub struct Transformer {
+    pub config: Config,
+    pub weights: TransformerWeights,
+    pub state: RunState,
 }
 
-#[derive(Debug)]
-struct Transformer {
-    config: Config,
-    weights: TransformerWeights,
-    state: RunState,
-}
-
-fn dequantize(qx: &QuantizedTensor, x: &mut [f32]) {
+pub fn dequantize(qx: &QuantizedTensor, x: &mut [f32]) {
     for i in 0..x.len() {
         x[i] = qx.q[i] as f32 * qx.s[i / GS];
     }
 }
 
-fn quantize(qx: &mut QuantizedTensor, x: &[f32]) {
+pub fn quantize(qx: &mut QuantizedTensor, x: &[f32]) {
     let num_groups = x.len() / GS;
     let q_max = 127.0;
     for group in 0..num_groups {
@@ -98,7 +213,7 @@ fn quantize(qx: &mut QuantizedTensor, x: &[f32]) {
     }
 }
 
-fn malloc_run_state(config: &Config) -> RunState {
+pub fn malloc_run_state(config: &Config) -> RunState {
     let kv_dim = (config.dim * config.n_kv_heads) / config.n_heads;
     RunState {
         x: vec![0.0; config.dim],
@@ -124,7 +239,7 @@ fn malloc_run_state(config: &Config) -> RunState {
     }
 }
 
-fn rmsnorm(o: &mut [f32], x: &[f32], weight: &[f32], size: usize) {
+pub fn rmsnorm(o: &mut [f32], x: &[f32], weight: &[f32], size: usize) {
     let mut ss = 0.0;
     for j in 0..size {
         ss += x[j] * x[j];
@@ -137,7 +252,7 @@ fn rmsnorm(o: &mut [f32], x: &[f32], weight: &[f32], size: usize) {
     }
 }
 
-fn softmax(x: &mut [f32]) {
+pub fn softmax(x: &mut [f32]) {
     let max_val = x.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let sum: f32 = x.iter().map(|&xi| (xi - max_val).exp()).sum();
     for xi in x.iter_mut() {
@@ -145,7 +260,7 @@ fn softmax(x: &mut [f32]) {
     }
 }
 
-fn matmul(xout: &mut [f32], x: &QuantizedTensor, w: &QuantizedTensor, n: usize, d: usize) {
+pub fn matmul(xout: &mut [f32], x: &QuantizedTensor, w: &QuantizedTensor, n: usize, d: usize) {
     // W (d,n) @ x (n,) -> xout (d,)
     // The most time-consuming part of the function
 
@@ -174,7 +289,7 @@ fn matmul(xout: &mut [f32], x: &QuantizedTensor, w: &QuantizedTensor, n: usize, 
     }
 }
 
-fn forward(transformer: &mut Transformer, token: usize, pos: usize) -> &Vec<f32> {
+pub fn forward(transformer: &mut Transformer, token: usize, pos: usize) -> &Vec<f32> {
     // Convenience variables
     let p = &transformer.config;
     let w = &transformer.weights;
@@ -317,4 +432,224 @@ fn forward(transformer: &mut Transformer, token: usize, pos: usize) -> &Vec<f32>
     matmul(&mut s.logits, &s.xq, &w.wcls, dim, p.vocab_size);
 
     &s.logits
+}
+
+pub fn memory_map_weights(
+    weights: &mut TransformerWeights,
+    config: &Config,
+    ptr: *const u8,
+    shared_classifier: bool,
+) {
+    let mut offset = 0;
+
+    unsafe {
+        let fptr = ptr as *const f32;
+
+        // Map RMSNorm weights
+        weights.rms_att_weight = Vec::from_raw_parts(
+            fptr.add(offset) as *mut f32,
+            config.n_layers as usize * config.dim as usize,
+            config.n_layers as usize * config.dim as usize,
+        );
+        offset += config.n_layers as usize * config.dim as usize;
+
+        weights.rms_ffn_weight = Vec::from_raw_parts(
+            fptr.add(offset) as *mut f32,
+            config.n_layers as usize * config.dim as usize,
+            config.n_layers as usize * config.dim as usize,
+        );
+        offset += config.n_layers as usize * config.dim as usize;
+
+        weights.rms_final_weight = Vec::from_raw_parts(
+            fptr.add(offset) as *mut f32,
+            config.dim as usize,
+            config.dim as usize,
+        );
+        offset += config.dim as usize;
+
+        // Map quantized token embeddings
+        weights.q_tokens.q = Vec::from_raw_parts(
+            ptr.add(offset) as *mut i8,
+            config.vocab_size as usize * config.dim as usize,
+            config.vocab_size as usize * config.dim as usize,
+        );
+        offset += config.vocab_size as usize * config.dim as usize;
+
+        weights.q_tokens.s = Vec::from_raw_parts(
+            ptr.add(offset) as *mut f32,
+            config.vocab_size as usize * config.dim as usize / GS,
+            config.vocab_size as usize * config.dim as usize / GS,
+        );
+        offset += config.vocab_size as usize * config.dim as usize / GS;
+
+        // Dequantize token embedding table
+        weights.token_embedding_table = vec![0.0; config.vocab_size as usize * config.dim as usize];
+        dequantize(&weights.q_tokens, &mut weights.token_embedding_table);
+
+        // Map other quantized tensors
+        fn map_quantized_tensor(
+            ptr: *const u8,
+            offset: &mut usize,
+            count: usize,
+            size: usize,
+        ) -> QuantizedTensor {
+            unsafe {
+                let q =
+                    Vec::from_raw_parts(ptr.add(*offset) as *mut i8, count * size, count * size);
+                *offset += count * size;
+
+                let s = Vec::from_raw_parts(
+                    ptr.add(*offset) as *mut f32,
+                    count * size / GS,
+                    count * size / GS,
+                );
+                *offset += count * size / GS;
+
+                QuantizedTensor { q, s }
+            }
+        }
+
+        weights.wq = (0..config.n_layers)
+            .map(|_| {
+                map_quantized_tensor(
+                    ptr,
+                    &mut offset,
+                    config.dim as usize,
+                    config.n_heads as usize * config.dim as usize / config.n_heads as usize,
+                )
+            })
+            .collect();
+        weights.wk = (0..config.n_layers)
+            .map(|_| {
+                map_quantized_tensor(
+                    ptr,
+                    &mut offset,
+                    config.dim as usize,
+                    config.n_kv_heads as usize * config.dim as usize / config.n_heads as usize,
+                )
+            })
+            .collect();
+        weights.wv = (0..config.n_layers)
+            .map(|_| {
+                map_quantized_tensor(
+                    ptr,
+                    &mut offset,
+                    config.dim as usize,
+                    config.n_kv_heads as usize * config.dim as usize / config.n_heads as usize,
+                )
+            })
+            .collect();
+        weights.wo = (0..config.n_layers)
+            .map(|_| {
+                map_quantized_tensor(
+                    ptr,
+                    &mut offset,
+                    config.n_heads as usize * config.dim as usize / config.n_heads as usize,
+                    config.dim as usize,
+                )
+            })
+            .collect();
+        weights.w1 = (0..config.n_layers)
+            .map(|_| {
+                map_quantized_tensor(
+                    ptr,
+                    &mut offset,
+                    config.dim as usize,
+                    config.hidden_dim as usize,
+                )
+            })
+            .collect();
+        weights.w2 = (0..config.n_layers)
+            .map(|_| {
+                map_quantized_tensor(
+                    ptr,
+                    &mut offset,
+                    config.hidden_dim as usize,
+                    config.dim as usize,
+                )
+            })
+            .collect();
+        weights.w3 = (0..config.n_layers)
+            .map(|_| {
+                map_quantized_tensor(
+                    ptr,
+                    &mut offset,
+                    config.dim as usize,
+                    config.hidden_dim as usize,
+                )
+            })
+            .collect();
+
+        // Map classifier weights
+        weights.wcls = if shared_classifier {
+            weights.q_tokens.clone()
+        } else {
+            map_quantized_tensor(
+                ptr,
+                &mut offset,
+                config.dim as usize,
+                config.vocab_size as usize,
+            )
+        };
+    }
+}
+
+pub fn read_checkpoint(
+    checkpoint: &str,
+    config: &mut Config,
+    weights: &mut TransformerWeights,
+    fd: &mut i32,
+    data: &mut Vec<f32>,
+    file_size: &mut usize,
+) {
+    let mut file = File::open(checkpoint).expect("Couldn't open checkpoint file");
+    *file_size = file.metadata().expect("Couldn't read metadata").len() as usize;
+
+    let mut buffer = vec![0u8; *file_size];
+    file.read_exact(&mut buffer)
+        .expect("Couldn't read checkpoint file");
+
+    unsafe {
+        let ptr = buffer.as_ptr();
+
+        // Read magic number
+        let magic_number = *(ptr as *const u32);
+        if magic_number != 0x616b3432 {
+            panic!("Bad magic number");
+        }
+
+        // Read version number
+        let version = *(ptr.add(4) as *const i32);
+        if version != 2 {
+            panic!("Bad version {}, need version 2", version);
+        }
+
+        // Read config
+        let config_size = mem::size_of::<Config>();
+        let config_ptr = ptr.add(8) as *const Config;
+        *config = (*config_ptr).clone();
+
+        // Read flags
+        let shared_classifier = *(ptr.add(8 + config_size) as *const u8) != 0;
+        let group_size = *(ptr.add(8 + config_size + 1) as *const i32);
+
+        // TODO: fix me
+        // Set group size globally
+        // unsafe {
+        //     GS = group_size as usize;
+        // }
+
+        // Memory map the weights
+        let weights_ptr = ptr.add(8 + config_size + 1 + 4);
+        memory_map_weights(weights, config, weights_ptr, shared_classifier);
+    }
+
+    *fd = file.as_raw_fd();
+    *data = unsafe {
+        slice::from_raw_parts(
+            buffer.as_ptr() as *const f32,
+            *file_size / mem::size_of::<f32>(),
+        )
+    }
+    .to_vec();
 }
