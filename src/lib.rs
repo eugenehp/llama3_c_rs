@@ -313,6 +313,18 @@ impl Drop for Tokenizer {
     }
 }
 
+impl Default for Tokenizer {
+    fn default() -> Self {
+        Self {
+            vocab: vec![],
+            vocab_scores: vec![],
+            sorted_vocab: vec![],
+            vocab_size: 0,
+            max_token_length: 0,
+        }
+    }
+}
+
 impl TokenIndex {
     pub fn new(str: String, id: usize) -> Self {
         TokenIndex { str, id }
@@ -484,6 +496,17 @@ impl Drop for Sampler {
     }
 }
 
+impl Default for Sampler {
+    fn default() -> Self {
+        Self {
+            probindex: vec![],
+            temperature: 1.0,
+            topp: 0.9,
+            rng_state: 0,
+        }
+    }
+}
+
 impl Sampler {
     /// Initialize the sampler with the required parameters
     pub fn build(&mut self, vocab_size: usize, temperature: f32, topp: f32, rng_seed: u64) {
@@ -585,39 +608,71 @@ impl Sampler {
     }
 }
 
-// pub fn build_transformer(transformer: &mut Transformer, checkpoint_path: &str) {
-//     // Initialize the transformer model with weights and buffers
-// }
-
-// pub fn generate(
-//     transformer: &Transformer,
-//     tokenizer: &Tokenizer,
-//     sampler: &Sampler,
-//     prompt: &str,
-//     steps: usize,
-// ) {
-//     // Handle the generation loop based on the input prompt
-// }
-
-// pub fn chat(
-//     transformer: &Transformer,
-//     tokenizer: &Tokenizer,
-//     sampler: &Sampler,
-//     cli_user_prompt: &str,
-//     cli_system_prompt: &str,
-//     steps: usize,
-// ) {
-//     // Handle interactive chat sessions
-// }
-
-// pub fn time_in_ms() -> u128 {
-//     // Get the current time in milliseconds for benchmarking
-//     use std::time::SystemTime;
-//     SystemTime::now()
-//         .duration_since(SystemTime::UNIX_EPOCH)
-//         .unwrap()
-//         .as_millis()
-// }
+impl Default for Transformer {
+    fn default() -> Self {
+        Self {
+            config: Config {
+                dim: 768,
+                hidden_dim: 3072,
+                n_layers: 12,
+                n_heads: 12,
+                n_kv_heads: 12,
+                vocab_size: 50257,
+                seq_len: 1024,
+            },
+            weights: TransformerWeights {
+                q_tokens: QuantizedTensor {
+                    q: vec![],
+                    s: vec![],
+                },
+                token_embedding_table: vec![],
+                rms_att_weight: vec![],
+                rms_ffn_weight: vec![],
+                wq: vec![],
+                wk: vec![],
+                wv: vec![],
+                wo: vec![],
+                w1: vec![],
+                w2: vec![],
+                w3: vec![],
+                rms_final_weight: vec![],
+                wcls: QuantizedTensor {
+                    q: vec![],
+                    s: vec![],
+                },
+            },
+            state: RunState {
+                x: vec![],
+                xb: vec![],
+                xb2: vec![],
+                hb: vec![],
+                hb2: vec![],
+                xq: QuantizedTensor {
+                    q: vec![],
+                    s: vec![],
+                },
+                hq: QuantizedTensor {
+                    q: vec![],
+                    s: vec![],
+                },
+                q: vec![],
+                k: vec![],
+                v: vec![],
+                att: vec![],
+                logits: vec![],
+                key_cache: vec![],
+                value_cache: vec![],
+            },
+            fd: -1,
+            data: vec![],
+            file_size: 0,
+            #[cfg(feature = "llama2")]
+            rope_tf: 10_000.0,
+            #[cfg(feature = "llama3")]
+            rope_tf: 50_0000.0,
+        }
+    }
+}
 
 impl Transformer {
     pub fn build_transformer(&mut self, checkpoint_path: &str) {
@@ -1086,7 +1141,7 @@ impl Transformer {
         &mut self,
         tokenizer: &Tokenizer,
         sampler: &mut Sampler,
-        cli_user_prompt: &mut str,
+        cli_user_prompt: &str,
         cli_system_prompt: &str,
         steps: usize,
     ) {

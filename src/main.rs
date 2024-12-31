@@ -150,7 +150,11 @@ fn main() {
 
     // Build the Tokenizer via the tokenizer .bin file
     let mut tokenizer = Tokenizer::default();
-    tokenizer.build_tokenizer(&tokenizer_path, transformer.config.vocab_size);
+    build_tokenizer(
+        &mut tokenizer,
+        &tokenizer_path,
+        transformer.config.vocab_size,
+    );
 
     // Build the Sampler
     let mut sampler = Sampler::default();
@@ -160,14 +164,14 @@ fn main() {
     if mode == "generate" {
         transformer.generate(
             &tokenizer,
-            &sampler,
+            &mut sampler,
             prompt.as_deref().unwrap_or_default(),
             steps,
         );
     } else if mode == "chat" {
         transformer.chat(
             &tokenizer,
-            &sampler,
+            &mut sampler,
             prompt.as_deref().unwrap_or_default(),
             system_prompt.as_deref().unwrap_or_default(),
             steps,
