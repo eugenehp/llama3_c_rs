@@ -4,3 +4,8 @@ version = "0.0.1"
 edition = "2021"
 
 [dependencies]
+
+[features]
+default = ["llama3"]
+llama2 = []
+llama3 = []
